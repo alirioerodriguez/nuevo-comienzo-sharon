@@ -142,6 +142,14 @@
   .app .date{font-size:.76rem;color:var(--plum-soft)}
   .app .note{font-size:.85rem;color:var(--plum-soft);margin-top:6px}
   .del{margin-left:auto;background:none;border:none;color:var(--rose-deep);cursor:pointer;font-size:.8rem;font-weight:700;padding:2px 4px}
+  .app.editing{border-color:var(--mauve)}
+  .app .acts{margin-left:auto;display:flex;align-items:center;gap:2px;flex-shrink:0}
+  .edit{background:none;border:none;color:var(--mauve);cursor:pointer;font-size:.8rem;font-weight:700;padding:2px 4px;font-family:inherit}
+  .app select.badge{font-family:inherit;line-height:1.35;border:none;cursor:pointer;max-width:150px;
+       -webkit-appearance:none;appearance:none;padding:4px 24px 4px 10px;
+       background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' fill='none' stroke='%237C6069' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+       background-repeat:no-repeat;background-position:right 9px center;background-size:8px 5px}
+  .app select.badge:focus{outline:none;box-shadow:0 0 0 2px var(--mauve)}
   .empty{text-align:center;color:var(--plum-soft);font-size:.9rem;padding:20px 8px;
          border:1.5px dashed var(--line);border-radius:16px;background:#FDF6F3}
 
@@ -460,6 +468,7 @@
         </div>
         <div><label>Nota (opcional)</label><input id="fNote" placeholder="Contacto, fecha de entrevista, etc."></div>
         <button class="btn btn-primary" id="addApp">Guardar postulación</button>
+        <button class="btn btn-ghost" id="cancelEdit" style="display:none">Cancelar edición</button>
       </div>
     </div>
 
@@ -490,7 +499,7 @@
 
     <div class="foot">
       Hecho con cariño para tu nuevo comienzo. 🌷<br>
-      Todo lo que guardas queda solo en este dispositivo.
+      Tu progreso se sincroniza y te sigue a cualquier dispositivo.
     </div>
   </section>
 
@@ -529,6 +538,102 @@
   function load(k,def){
     try{ var r = localStorage.getItem(k); return r===null ? def : JSON.parse(r); }
     catch(e){ return (k in mem) ? mem[k] : def; }
+  }
+
+  /* ---- sincronización en la nube (Supabase) ---- */
+  var SUPABASE_URL = "https://ligeqnuxarcbuzjeofji.supabase.co";
+  var SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxpZ2VxbnV4YXJjYnV6amVvZmppIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ3NTQxOTUsImV4cCI6MjEwMDMzMDE5NX0.6UEDXuykmZ1lYMXXJwr4YYHQo1x_XWKsFFDcbM3xVMY";
+  var STATE_ID = "sharon-kk26qq3x35oi2x";
+  var REST_URL = SUPABASE_URL + "/rest/v1/app_state";
+
+  var cloudReady   = false; /* ya se intentó traer lo remoto al abrir */
+  var touched      = false; /* la usuaria ya modificó algo en esta sesión */
+  var pendingLocal = false; /* el último push a la nube falló */
+  var warnedAt     = 0;
+
+  function sbHeaders(extra){
+    var h = {
+      "apikey": SUPABASE_KEY,
+      "Authorization": "Bearer " + SUPABASE_KEY,
+      "Content-Type": "application/json"
+    };
+    if(extra){ for(var k in extra){ h[k] = extra[k]; } }
+    return h;
+  }
+
+  /* estado completo que viaja a la nube */
+  function snapshot(){ return { checks: checks, apps: apps }; }
+
+  function warnLocal(){
+    var now = Date.now();
+    if(now - warnedAt > 20000){ warnedAt = now; toast('Guardado en este dispositivo'); }
+  }
+
+  /* sube TODO el estado (upsert por id) */
+  function pushCloud(keepalive){
+    var opts = {
+      method: "POST",
+      headers: sbHeaders({ "Prefer": "resolution=merge-duplicates,return=minimal" }),
+      body: JSON.stringify([{
+        id: STATE_ID,
+        data: snapshot(),
+        updated_at: new Date().toISOString()
+      }])
+    };
+    if(keepalive){ opts.keepalive = true; }
+    try{
+      return fetch(REST_URL, opts).then(function(r){
+        pendingLocal = !r.ok;
+        if(!r.ok && !keepalive){ warnLocal(); }
+        return r.ok;
+      }).catch(function(){
+        pendingLocal = true;
+        if(!keepalive){ warnLocal(); }
+        return false;
+      });
+    }catch(e){
+      pendingLocal = true;
+      if(!keepalive){ warnLocal(); }
+      return Promise.resolve(false);
+    }
+  }
+
+  /* trae el estado guardado en la nube (null si no hay o si falla) */
+  function pullCloud(){
+    var url = REST_URL + "?id=eq." + encodeURIComponent(STATE_ID) + "&select=data";
+    try{
+      return fetch(url, { method:"GET", headers: sbHeaders(), cache:"no-store" })
+        .then(function(r){ return r.ok ? r.json() : null; })
+        .then(function(rows){
+          return (rows && rows.length && rows[0] && rows[0].data) ? rows[0].data : null;
+        })
+        .catch(function(){ return null; });
+    }catch(e){ return Promise.resolve(null); }
+  }
+
+  /* guarda local + sube: se llama en TODA modificación */
+  function syncNow(){
+    touched = true;
+    save('sharon_checks', checks);
+    save('sharon_apps', apps);
+    pushCloud(false);
+  }
+
+  /* vuelca en pantalla lo que vino de la nube */
+  function applyRemote(data){
+    if(!data || typeof data !== 'object'){ return; }
+    if(data.checks && typeof data.checks === 'object'){
+      checks = data.checks;
+      boxes.forEach(function(b){ b.checked = !!checks[b.dataset.id]; });
+      refreshProgress();
+    }
+    if(Object.prototype.toString.call(data.apps) === '[object Array]'){
+      apps = data.apps;
+      if(editingId && !findApp(editingId)){ exitEdit(); clearForm(); }
+      renderApps();
+    }
+    save('sharon_checks', checks);
+    save('sharon_apps', apps);
   }
 
   /* ---- toast ---- */
@@ -579,15 +684,15 @@
     var id = b.dataset.id;
     if(checks[id]) b.checked = true;
     b.addEventListener('change', function(){
-      checks[id] = b.checked; save('sharon_checks', checks); refreshProgress();
+      checks[id] = b.checked; refreshProgress(); syncNow();
     });
   });
   refreshProgress();
 
   document.getElementById('resetChecks').addEventListener('click', function(){
-    checks = {}; save('sharon_checks', checks);
+    checks = {};
     boxes.forEach(function(b){ b.checked = false; });
-    refreshProgress(); toast('Semana reiniciada 🌱');
+    refreshProgress(); syncNow(); toast('Semana reiniciada 🌱');
   });
 
   /* ---- copiar plantillas ---- */
@@ -612,11 +717,68 @@
   /* ---- tracker de postulaciones ---- */
   var apps = load('sharon_apps', []);
   var labels = {guardada:'Guardada',postulada:'Postulada',entrevista:'Entrevista',oferta:'Oferta',descartada:'Descartada'};
+  var orden  = ['guardada','postulada','entrevista','oferta','descartada'];
+
+  var addBtn    = document.getElementById('addApp');
+  var cancelBtn = document.getElementById('cancelEdit');
+  var ADD_TXT   = addBtn.textContent;
+  var editingId = null;
 
   function fmtDate(ts){
     var d = new Date(ts);
     return d.toLocaleDateString('es', {day:'2-digit', month:'short'});
   }
+  function findApp(id){
+    for(var i=0;i<apps.length;i++){ if(apps[i].id === id){ return apps[i]; } }
+    return null;
+  }
+  function clearForm(){
+    document.getElementById('fRole').value='';
+    document.getElementById('fCo').value='';
+    document.getElementById('fPortal').value='';
+    document.getElementById('fNote').value='';
+    document.getElementById('fState').value='guardada';
+  }
+  function exitEdit(){
+    editingId = null;
+    addBtn.textContent = ADD_TXT;
+    cancelBtn.style.display = 'none';
+  }
+  function startEdit(id){
+    var a = findApp(id); if(!a){ return; }
+    editingId = id;
+    document.getElementById('fRole').value   = a.role   || '';
+    document.getElementById('fCo').value     = a.co     || '';
+    document.getElementById('fPortal').value = a.portal || '';
+    document.getElementById('fState').value  = a.state  || 'guardada';
+    document.getElementById('fNote').value   = a.note   || '';
+    addBtn.textContent = 'Actualizar cambios';
+    cancelBtn.style.display = '';
+    renderApps();
+    var f = document.getElementById('fRole');
+    if(f && f.scrollIntoView){ f.scrollIntoView({block:'center', behavior:'smooth'}); }
+  }
+
+  /* selector de estado dentro de cada tarjeta */
+  function stateSelect(a){
+    var s = document.createElement('select');
+    s.className = 'badge b-' + a.state;
+    s.setAttribute('aria-label', 'Estado de la postulación');
+    orden.forEach(function(k){
+      var o = document.createElement('option');
+      o.value = k; o.textContent = labels[k];
+      if(k === a.state){ o.selected = true; }
+      s.appendChild(o);
+    });
+    s.addEventListener('change', function(){
+      var it = findApp(a.id); if(!it){ return; }
+      it.state = s.value;
+      s.className = 'badge b-' + it.state;
+      renderApps(); syncNow(); toast(labels[it.state] + ' ✓');
+    });
+    return s;
+  }
+
   function renderApps(){
     var list = document.getElementById('appList');
     document.getElementById('stTotal').textContent = apps.length;
@@ -630,45 +792,85 @@
     list.innerHTML = '';
     apps.slice().reverse().forEach(function(a){
       var el = document.createElement('div'); el.className = 'app';
+      if(a.id === editingId){ el.classList.add('editing'); }
       el.innerHTML =
         '<div class="top"><div><div class="role"></div><div class="co"></div></div>'+
-        '<button class="del" aria-label="Eliminar">Quitar</button></div>'+
-        '<div class="meta"><span class="badge b-'+a.state+'">'+labels[a.state]+'</span>'+
+        '<div class="acts"><button class="edit" aria-label="Editar">Editar</button>'+
+        '<button class="del" aria-label="Eliminar">Quitar</button></div></div>'+
+        '<div class="meta">'+
         (a.portal?'<span class="date">'+'· '+'</span>':'')+
         '<span class="date">'+fmtDate(a.ts)+'</span></div>'+
         (a.note?'<div class="note"></div>':'');
       el.querySelector('.role').textContent = a.role || 'Sin título';
       el.querySelector('.co').textContent = a.co || '';
+      var meta = el.querySelector('.meta');
+      meta.insertBefore(stateSelect(a), meta.firstChild);
       if(a.portal){ el.querySelectorAll('.date')[0].textContent = '· '+a.portal; }
       if(a.note){ el.querySelector('.note').textContent = a.note; }
+      el.querySelector('.edit').addEventListener('click', function(){
+        startEdit(a.id);
+      });
       el.querySelector('.del').addEventListener('click', function(){
         apps = apps.filter(function(x){ return x.id !== a.id; });
-        save('sharon_apps', apps); renderApps();
+        if(editingId === a.id){ exitEdit(); clearForm(); }
+        renderApps(); syncNow();
       });
       list.appendChild(el);
     });
   }
-  document.getElementById('addApp').addEventListener('click', function(){
+
+  addBtn.addEventListener('click', function(){
     var role = document.getElementById('fRole').value.trim();
     var co   = document.getElementById('fCo').value.trim();
     if(!role && !co){ toast('Pon al menos el puesto o la empresa'); return; }
-    apps.push({
-      id: Date.now()+''+Math.floor(Math.random()*999),
-      role: role, co: co,
-      portal: document.getElementById('fPortal').value.trim(),
-      state: document.getElementById('fState').value,
-      note: document.getElementById('fNote').value.trim(),
-      ts: Date.now()
-    });
-    save('sharon_apps', apps);
-    document.getElementById('fRole').value='';
-    document.getElementById('fCo').value='';
-    document.getElementById('fPortal').value='';
-    document.getElementById('fNote').value='';
-    document.getElementById('fState').value='guardada';
-    renderApps(); toast('Guardada ✓');
+    var portal = document.getElementById('fPortal').value.trim();
+    var state  = document.getElementById('fState').value;
+    var note   = document.getElementById('fNote').value.trim();
+
+    if(editingId){
+      var a = findApp(editingId);
+      if(a){
+        a.role = role; a.co = co; a.portal = portal; a.state = state; a.note = note;
+        a.updated = Date.now();
+      }
+      exitEdit(); clearForm(); renderApps(); syncNow(); toast('Actualizada ✓');
+    } else {
+      apps.push({
+        id: Date.now()+''+Math.floor(Math.random()*999),
+        role: role, co: co,
+        portal: portal,
+        state: state,
+        note: note,
+        ts: Date.now()
+      });
+      clearForm(); renderApps(); syncNow(); toast('Guardada ✓');
+    }
   });
+
+  cancelBtn.addEventListener('click', function(){
+    exitEdit(); clearForm(); renderApps();
+  });
+
   renderApps();
+
+  /* ---- arranque: primero lo local (ya pintado), después la nube ---- */
+  pullCloud().then(function(remote){
+    cloudReady = true;
+    if(remote && !touched){ applyRemote(remote); }
+    else { pushCloud(false); } /* no había fila remota, o ya hubo cambios locales: sembramos la nube */
+  });
+
+  /* ---- sincronizar al salir y al ocultar la pestaña ---- */
+  window.addEventListener('beforeunload', function(){ pushCloud(true); });
+  window.addEventListener('pagehide', function(){ pushCloud(true); });
+  document.addEventListener('visibilitychange', function(){
+    if(document.visibilityState === 'hidden'){
+      pushCloud(true);
+    } else if(document.visibilityState === 'visible' && cloudReady && !pendingLocal){
+      /* al volver, traemos lo que haya cambiado desde otro dispositivo */
+      pullCloud().then(function(remote){ if(remote){ applyRemote(remote); } });
+    }
+  });
 
 })();
 </script>
