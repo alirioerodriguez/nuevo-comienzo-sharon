@@ -585,9 +585,7 @@ Ciencia de Datos e IA y aplico agentes de IA al testing.</pre></div>
   function save(k,v){try{localStorage.setItem(k,JSON.stringify(v));}catch(e){mem[k]=v;}}
   function load(k,def){try{var r=localStorage.getItem(k);return r===null?def:JSON.parse(r);}catch(e){return (k in mem)?mem[k]:def;}}
 
-  /* ===== Supabase (sincronización) ===== */
-  var SUPABASE_URL="https://ligeqnuxarcbuzjeofji.supabase.co";
-  var SUPABASE_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxpZ2VxbnV4YXJjYnV6amVvZmppIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ3NTQxOTUsImV4cCI6MjEwMDMzMDE5NX0.6UEDXuykmZ1lYMXXJwr4YYHQo1x_XWKsFFDcbM3xVMY";
+  /* ===== Sincronización (Neon, vía /api/estado) ===== */
   // Cada dispositivo tiene su propio código secreto (UUID al azar): sus datos solo se leen y guardan con ese código.
   // Para usar los mismos datos en otro dispositivo se abre el link con ?codigo=<código>.
   var UUID_RE=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -606,21 +604,20 @@ Ciencia de Datos e IA y aplico agentes de IA al testing.</pre></div>
   var CLOUD_ID=codigoLink||load('unc_codigo',null);
   if(!CLOUD_ID||!UUID_RE.test(CLOUD_ID))CLOUD_ID=nuevoCodigo();
   save('unc_codigo',CLOUD_ID);
-  var cloudOn=SUPABASE_URL.indexOf("http")===0 && SUPABASE_KEY.length>20;
+  var cloudOn=location.protocol.indexOf("http")===0;
   var cloudT;
-  function rpc(fn,body){
-    return fetch(SUPABASE_URL+"/rest/v1/rpc/"+fn,{method:"POST",
-      headers:{"apikey":SUPABASE_KEY,"Authorization":"Bearer "+SUPABASE_KEY,"Content-Type":"application/json"},
-      body:JSON.stringify(body)});
+  function api(accion,extra){
+    var body=JSON.stringify(Object.assign({accion:accion,id:CLOUD_ID},extra||{}));
+    return fetch("/api/estado",{method:"POST",headers:{"Content-Type":"application/json"},body:body,keepalive:body.length<60000});
   }
   function scheduleCloud(){ if(!cloudOn)return; clearTimeout(cloudT); cloudT=setTimeout(syncNow,600); }
   function syncNow(){
     if(!cloudOn)return;
-    rpc("guardar_estado",{p_id:CLOUD_ID,p_data:{checks:load('sharon_checks',{}),apps:load('sharon_apps',[])}}).catch(function(){});
+    api("guardar",{data:{checks:load('sharon_checks',{}),apps:load('sharon_apps',[])}}).catch(function(){});
   }
   function cloudLoad(cb){
     if(!cloudOn){if(cb)cb();return;}
-    rpc("leer_estado",{p_id:CLOUD_ID})
+    api("leer")
     .then(function(r){return r.ok?r.json():null;})
     .then(function(d){
       if(d&&typeof d==='object'){
